@@ -1,0 +1,11 @@
+[package]
+name = "lcg32"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+smokerand-rs = { path = "../../smokerand-rs" }
