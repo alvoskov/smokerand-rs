@@ -5,6 +5,7 @@ members = [
     "examples/lcg127prime",
     "examples/lcg128",
     "examples/lcg32",
+    "examples/mwcfp",
     "examples/kiss2003",
     "examples/threefish1024"
 ]
