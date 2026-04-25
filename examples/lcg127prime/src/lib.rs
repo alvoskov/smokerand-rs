@@ -1,14 +1,10 @@
 use smokerand_rs::*;
 
-#[repr(C)]
 struct Lcg128State {
     x: u128
 }
 
 impl Lcg128State {
-//    fn seed(&mut self, intf: &CallerAPI) {
-//    }
-
     #[inline(always)]
     fn get_bits_generic_raw(&mut self, a: u64) -> u64 {
         const MASK: u64 = 0x7fffffffffffffff;        
@@ -45,7 +41,7 @@ impl Lcg128State {
 
     #[inline(always)]
     fn get_bits_mul1_raw(&mut self) -> u64 {
-        self.get_bits_generic_raw(13433445539930070091u64)
+        self.get_bits_generic_raw(13433445539930070091_u64)
     }
 }
 
@@ -100,6 +96,4 @@ impl Prng for Lcg128State {
 
 impl_ffi_for_prng! {
     type = Lcg128State,
-    name = "Lcg127prime:mul1",
-    description = "LCG mod 2**127 - 1 with multiplier 13433445539930070091",
 }

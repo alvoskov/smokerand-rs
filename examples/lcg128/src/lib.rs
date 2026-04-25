@@ -55,6 +55,4 @@ impl Prng for Lcg128State {
 
 impl_ffi_for_prng! {
     type = Lcg128State,
-    name = "LCG128 (Rust)",
-    description = "128-bit LCG, returns high 64 bits",
 }

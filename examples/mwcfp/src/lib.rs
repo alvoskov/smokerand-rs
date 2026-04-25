@@ -1,5 +1,6 @@
 use smokerand_rs::*;
 use std::ops::{BitOr, BitXor};
+use std::ffi::CStr;
 
 // ============ Трейт с разрядностью ============
 trait MwcWord: Copy + Default + PartialEq + PartialOrd + BitOr<Output = Self> + BitXor<Output = Self> {
@@ -140,11 +141,10 @@ struct MwcFpState<W: MwcWord, const LAG: usize> {
     c: W,
     pos: usize,
     mul: W,
-    use_rrx: bool,
 }
 
 impl<W: MwcWord, const LAG: usize> MwcFpState<W, LAG> {
-    fn new(intf: &CallerAPI, mul: u64, use_rrx: bool) -> Option<Self> {
+    fn new(intf: &CallerAPI, mul: u64) -> Option<Self> {
         let mut x = [W::zero(); LAG];
         
         for i in 0..LAG {
@@ -157,7 +157,6 @@ impl<W: MwcWord, const LAG: usize> MwcFpState<W, LAG> {
             c: W::one(),
             pos: LAG,
             mul: W::from_u64(mul),
-            use_rrx,
         })
     }
     
@@ -283,14 +282,9 @@ fn run_test32<G: Prng<Output = u32>>(
     is_ok
 }
 
-// Генерация вариантов
-// ============ Генерация вариантов ============
-declare_mwcfp_variant!(Mwc64u32, u32, 2, 4291122658u64, "mwc64u32", false);
-//declare_mwcfp_variant!(Mwc64u32Rrx, u32, 2, 4291122658u64, "mwc64u32rrx", true);
-
 
 // ============ Конкретные тесты для каждого варианта ============
-
+/*
 /// Тест для MWC512u64 (lag=8)
 fn test_mwc512u64(intf: &CallerAPI) -> bool {
     // Создаём состояние вручную с фиксированными значениями
@@ -385,12 +379,20 @@ fn test_mwc64u32(intf: &CallerAPI) -> bool {
 
     run_test32(intf, state, &U_REF, 2)
 }
-
+*/
 
 
 // ============ Макрос для генерации конкретных вариантов ============
 macro_rules! declare_mwcfp_variant {
-    ($name:ident, $word:ty, $lag:literal, $mul:literal, $tag:literal, $use_rrx:literal) => {
+    (
+        $name:ident,
+        $word:ty,
+        $lag:literal,
+        $mul:literal,
+        $tag:literal,
+        $use_rrx:literal
+        $(, self_test = $self_test:expr)?
+    ) => {
         #[derive(Clone)]
         struct $name {
             inner: MwcFpState<$word, $lag>,
@@ -400,7 +402,7 @@ macro_rules! declare_mwcfp_variant {
             type Output = <$word as MwcWord>::PrngOutput;
             
             fn new(intf: &CallerAPI) -> Option<Self> {
-                MwcFpState::<$word, $lag>::new(intf, $mul, $use_rrx)
+                MwcFpState::<$word, $lag>::new(intf, $mul)
                     .map(|inner| $name { inner })
             }
             
@@ -408,7 +410,7 @@ macro_rules! declare_mwcfp_variant {
             fn next(&mut self) -> Self::Output {
                 let val = self.inner.next_raw();
                 
-                let result = if self.inner.use_rrx {
+                let result = if $use_rrx {
                     val ^ val.rotl(<$word>::RRX_SHIFT1) ^ val.rotl(<$word>::RRX_SHIFT2)
                 } else {
                     val
@@ -425,13 +427,41 @@ macro_rules! declare_mwcfp_variant {
                 concat!("MWCFP ", $tag)
             }
 
-//-----------------------------------------------------------------------------
+            fn self_test(intf: &CallerAPI) -> bool {
+                $( return $self_test(intf); )?
+                smokerand_rs::printlnf!((*intf), "Running MWCFP self-tests...");
+                true
+            }
+        }
+    };
+}
 
-        /// Глобальная функция self-test, вызываемая фреймворком
-        fn self_test(intf: &CallerAPI) -> bool {
+
+declare_mwcfp_variant!(Mwc64u32, u32, 2, 4291122658_u64, "mwc64u32", false);
+declare_mwcfp_variant!(Mwc128u64, u64, 2, 17741297344439402706_u64, "mwc128u64", false);
+
+/*
+impl Prng for Mwc64u32 {
+    fn self_test(intf: &CallerAPI) -> bool {
+        smokerand_rs::printlnf!((*intf), "A1");
+        true
+    }
+}
+
+
+impl Prng for Mwc128u32 {
+    fn self_test(intf: &CallerAPI) -> bool {
+        smokerand_rs::printlnf!((*intf), "A2");
+        true
+    }
+}
+*/
+
+
+
+/*
             use smokerand_rs::PrintfExt;
     
-            intf.rust_printf(format_args!("Running MWCFP self-tests...\n"));
     
             let is32_sm = test_mwc64u32(intf);
             let is64_sm = test_mwc128u64(intf);
@@ -447,24 +477,93 @@ macro_rules! declare_mwcfp_variant {
             }
     
             all_passed
-//------------------------------------------------------------------
-        }
+*/
+
+
+
+pub mod dispatcher {
+    pub fn get_array() -> &'static [crate::TaggedGeneratorInfo] {
+        use smokerand_rs::tag_gen_info;
+        static X : [crate::TaggedGeneratorInfo; 2] = [
+            tag_gen_info!("mwc64u32", crate::Mwc64u32),
+            tag_gen_info!("mwc128u64", crate::Mwc128u64)
+        ];
+        &X
+    }
+} // mod dispatcher
+
+smokerand_rs::make_dll_entry_point!();
+
+#[no_mangle]
+pub unsafe extern "C" fn gen_getinfo(
+    gi: *mut crate::GeneratorInfo,
+    intf: *const crate::CallerAPI,
+) -> i32 {
+    if gi.is_null() || intf.is_null() {
+        return 0;
+    };
+    let get_param = match (*intf).get_param {
+        Some(p) => p,
+        None => { return 0; }
+    };
+    let param = match CStr::from_ptr(get_param()).to_str() {
+        Ok(s) => s,
+        Err(_utf8_error) => {
+            smokerand_rs::printlnf!((*intf), "param value is corrupted");
+            return 0;
         }
     };
+
+    let gi_ref: &mut crate::GeneratorInfo = &mut *gi;
+    let callback = match dispatcher::get_array().iter().find(|&&s| s.0 == param) {
+        Some(&s) if s.0 == "" => GeneratorInfo::fill_static::<Mwc128u64>,
+        Some(&s) => s.1,
+        None => {
+            smokerand_rs::printlnf!((*intf), "Unknown parameter '{param}'");
+            smokerand_rs::printf!((*intf), "Available variants: ");
+            for a in dispatcher::get_array() {
+                smokerand_rs::printf!((*intf), "{} ", a.0);
+            }
+            smokerand_rs::printlnf!((*intf), "");
+            return 0;
+        }
+    };
+
+    callback(gi_ref)
 }
 
 
-// ============ Регистрация ============
-impl_ffi_for_prng! {
-    type = Mwc64u32,
-    name = "mwc64u32",
-    description = "MWCFP 64u32 (u32, lag=2, mul=4291122658)",
-}
+
+
 
 /*
-impl_ffi_for_prng! {
-    type = Mwc64u32Rrx,
-    name = "mwc64u32rrx",
-    description = "MWCFP 64u32rrx (u32, lag=2, mul=4291122658)",
-}
+let slice = &[10, 20, 30, 40, 50];
+
+match slice.iter().find(|&&x| x == 30) {
+    Some(&value) => println!("Found: {}", value),
+    None => println!("Not found"),
+};
 */
+
+/*
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+
+fn cchar_to_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    
+    unsafe {
+        match CStr::from_ptr(ptr).to_str() {
+            Ok(s) => Some(s.to_string()),
+            Err(_) => None,  // Некорректный UTF-8
+        }
+    }
+}
+
+// Использование:
+let rust_string = cchar_to_string(c_ptr).unwrap_or_default();
+*/
+
+

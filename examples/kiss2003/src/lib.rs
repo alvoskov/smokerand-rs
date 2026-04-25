@@ -8,7 +8,7 @@ struct Kiss03State {
 }
 
 impl Prng for Kiss03State {
-    type Output = u64;
+    type Output = u32;
 
     fn new(intf: &CallerAPI) -> Option<Self> {
         // Seed using two 64-bit values converted to 2x32 each
@@ -27,22 +27,19 @@ impl Prng for Kiss03State {
     }
     
     #[inline(always)]
-    fn next(&mut self) -> u64 {
+    fn next(&mut self) -> u32 {
         // LCG part: x = 69069 * x + 12345
-        self.x = 69069u32.wrapping_mul(self.x).wrapping_add(12345);
-        
+        self.x = 69069_u32.wrapping_mul(self.x).wrapping_add(12345);
         // Xorshift part
         self.y ^= self.y << 13;
         self.y ^= self.y >> 17;
-        self.y ^= self.y << 5;
-        
+        self.y ^= self.y << 5;        
         // MWC part: t = 698769069 * z + c
-        let t = 698769069u64.wrapping_mul(self.z as u64).wrapping_add(self.c as u64);
+        let t = 698769069_u64.wrapping_mul(self.z as u64).wrapping_add(self.c as u64);
         self.c = (t >> 32) as u32;
-        self.z = t as u32;
-        
-        // Combined output as u64
-        (self.x as u64).wrapping_add(self.y as u64).wrapping_add(self.z as u64)
+        self.z = t as u32;        
+        // Combined output
+        self.x.wrapping_add(self.y).wrapping_add(self.z)
     }
     
     fn name() -> &'static str {
@@ -50,7 +47,7 @@ impl Prng for Kiss03State {
     }
     
     fn description() -> &'static str {
-        "KISS2003 PRNG (LCG + Xorshift + MWC) returning 32-bit values as u64"
+        "KISS2003 combined PRNG (LCG + Xorshift + MWC)"
     }
     
     fn self_test(intf: &CallerAPI) -> bool {
@@ -68,7 +65,7 @@ impl Prng for Kiss03State {
         
         let mut x: u32 = 0;
         for _ in 0..ITERATIONS {
-            x = state.next() as u32;
+            x = state.next();
         }
         
         intf.rust_printf(format_args!(
@@ -82,6 +79,4 @@ impl Prng for Kiss03State {
 
 impl_ffi_for_prng! {
     type = Kiss03State,
-    name = "KISS2003 (Rust)",
-    description = "KISS2003 PRNG combining LCG, Xorshift, and MWC",
 }

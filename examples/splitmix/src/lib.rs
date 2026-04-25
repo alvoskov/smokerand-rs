@@ -24,11 +24,11 @@ impl Prng for SplitMixState {
     }
     
     fn name() -> &'static str {
-        "SplitMix (Rust)"
+        "SplitMix"
     }
     
     fn description() -> &'static str {
-        "SplitMix64 generator ported to Rust"
+        "SplitMix64 generator"
     }
     
     fn self_test(intf: &CallerAPI) -> bool {
@@ -49,6 +49,4 @@ impl Prng for SplitMixState {
 // Вызов макроса с обязательными параметрами
 impl_ffi_for_prng! {
     type = SplitMixState,
-    name = "SplitMix (Rust)",
-    description = "SplitMix64 generator ported to Rust",
 }

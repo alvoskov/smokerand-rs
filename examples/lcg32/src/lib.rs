@@ -5,7 +5,7 @@ struct Lcg32State {
 }
 
 impl Prng for Lcg32State {
-    type Output = u32;  // ← Указываем конкретный тип
+    type Output = u32;
     
     fn new(intf: &CallerAPI) -> Option<Self> {
         let seed = intf.seed32()?;
@@ -20,10 +20,12 @@ impl Prng for Lcg32State {
     fn name() -> &'static str {
         "LCG32"
     }
+
+    fn description() -> &'static str {
+        "32-bit LCG"
+    }
 }
 
 impl_ffi_for_prng! {
     type = Lcg32State,
-    name = "LCG32 (Rust)",
-    description = "32-bit LCG",
 }

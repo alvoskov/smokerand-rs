@@ -64,7 +64,7 @@ mod sealed {
 }
 
 /// PRNG interface
-pub trait Prng: Sized + 'static {
+pub trait Prng: Sized /*+ 'static*/ {
     type Output: PrngOutput;  /// u32 or u64 only!
 
     /// Создать новый экземпляр генератора
@@ -101,6 +101,131 @@ pub trait Prng: Sized + 'static {
 }
 
 
+pub mod cwrap {
+
+pub unsafe extern "C" fn get_bits<G: super::Prng>(state: *mut std::ffi::c_void) -> u64 {
+    let state = &mut *(state as *mut G);
+    <G as super::Prng>::next(state).into()
+}
+
+
+pub unsafe extern "C" fn get_sum<G: super::Prng>(state: *mut std::ffi::c_void, len: usize) -> u64 {
+    let state = &mut *(state as *mut G);
+    let mut sum = 0u64;
+    for _ in 0..len {
+        let val = <G as super::Prng>::next(state);
+        sum = sum.wrapping_add(val.into());
+    }
+    sum
+}
+
+pub unsafe extern "C" fn create<G: super::Prng>(
+    gi: *const super::GeneratorInfo,
+    intf: *const super::CallerAPI
+) -> *mut std::ffi::c_void {
+    let _ = gi;
+    if intf.is_null() { 
+        return std::ptr::null_mut(); 
+    }
+    let intf = &*intf;
+
+    // Create the state    
+    let state = match <G as super::Prng>::new(intf) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+
+    // We use custom allocator (malloc) from SmokeRand!
+    let malloc = match intf.malloc {
+        Some(f) => f,
+        None => return std::ptr::null_mut(),
+    };
+
+    let ptr = malloc(std::mem::size_of::<G>()) as *mut G;
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    // Write the state to the allocated memory    
+    ptr.write(state);    
+    ptr as *mut std::ffi::c_void
+}
+
+
+pub unsafe extern "C" fn free<G: super::Prng>(
+    state: *mut std::ffi::c_void,
+    gi: *const super::GeneratorInfo,
+    intf: *const super::CallerAPI,
+        ) {
+    if state.is_null() { 
+        return; 
+    }
+    let _ = gi;
+    let intf = &*intf;
+    // Manual call of the destructor
+    std::ptr::drop_in_place(state as *mut G);
+    // Use custom free from SmokeRand!
+    if let Some(free) = intf.free {
+        free(state as *mut std::ffi::c_void);
+    }
+}
+
+
+pub unsafe extern "C" fn self_test<G: super::Prng>(intf: *const super::CallerAPI) -> super::CInt {
+    if intf.is_null() {
+        return 0;
+    }
+    let intf = &*intf;
+    if <G as super::Prng>::self_test(intf) {
+        1 
+    } else { 
+        0 
+    }
+}
+
+} // mod cwrap
+
+
+impl GeneratorInfo {
+    pub fn fill_static<G: Prng>(
+        gi: &mut GeneratorInfo,
+    ) -> i32 {
+        // Leaking memory for static strings (acceptable for DLL)
+        let name_str = Box::leak(format!("{}\0", G::name()).into_boxed_str());
+        let desc_str = Box::leak(format!("{}\0", G::description()).into_boxed_str());
+
+        gi.name = name_str.as_ptr() as *const i8;
+        gi.description = desc_str.as_ptr() as *const i8;    
+        gi.nbits = G::bits();
+        gi.create = Some(cwrap::create::<G>);
+        gi.free = Some(cwrap::free::<G>);
+        gi.get_bits = Some(cwrap::get_bits::<G>);
+        gi.self_test = Some(cwrap::self_test::<G>);
+        gi.get_sum = Some(cwrap::get_sum::<G>);
+        gi.parent = std::ptr::null();
+    
+        1
+    }
+
+    pub fn fill<G: Prng>(
+        &mut self,
+    ) -> i32 {
+        Self::fill_static::<G>(self)
+    }
+}
+
+pub type FillGeneratorInfoFn = fn(gi: &mut GeneratorInfo) -> i32;
+
+pub type TaggedGeneratorInfo = (&'static str, crate::FillGeneratorInfoFn);
+
+#[macro_export]
+macro_rules! tag_gen_info {
+    ($name:literal, $prng_type:ty) => {
+        ($name, $crate::GeneratorInfo::fill_static::<$prng_type>)
+    }
+}
+
+
+
 /// Макросы для удобного использования
 #[macro_export]
 macro_rules! printf {
@@ -120,17 +245,10 @@ macro_rules! printlnf {
 }
 
 
-/// This macro generates all FFI functions requred by SmokeRand framework
+/// Windows DLL entry point
 #[macro_export]
-macro_rules! impl_ffi_for_prng {
-    (
-        type = $prng_type:ty,
-        name = $name:literal,
-        description = $desc:literal
-        $(, bits = $bits:literal)?
-        $(,)?
-    ) => {
-        // ========== Windows DLL entry point ==========
+macro_rules! make_dll_entry_point {
+    () => {
         #[cfg(all(windows, target_arch = "x86_64"))]
         #[no_mangle]
         pub unsafe extern "system" fn DllMainCRTStartup(
@@ -140,175 +258,45 @@ macro_rules! impl_ffi_for_prng {
         ) -> i32 {
             1
         }
+    };
+}
 
-        // ========== Constructors and destructors ==========
-        #[no_mangle]
-        pub unsafe extern "C" fn create(
-            gi: *const $crate::GeneratorInfo,
-            intf: *const $crate::CallerAPI
-        ) -> *mut std::ffi::c_void {
-            let _ = gi;
-            if intf.is_null() { 
-                return std::ptr::null_mut(); 
-            }
-            let intf = &*intf;
+/// This macro generates all FFI functions requred by SmokeRand framework
+#[macro_export]
+macro_rules! impl_ffi_for_prng {
+    (
+        type = $prng_type:ty,
+        $(,)?
+    ) => {
+        $crate::make_dll_entry_point!();
 
-            // Create the state    
-            let state = match <$prng_type as $crate::Prng>::new(intf) {
-                Some(s) => s,
-                None => return std::ptr::null_mut(),
-            };
-    
-            // We use custom allocator (malloc) from SmokeRand!
-            let malloc = match intf.malloc {
-                Some(f) => f,
-                None => return std::ptr::null_mut(),
-            };
-    
-            let ptr = malloc(std::mem::size_of::<$prng_type>()) as *mut $prng_type;
-            if ptr.is_null() {
-                return std::ptr::null_mut();
-            }
-            // Write the state to the allocated memory    
-            ptr.write(state);    
-            ptr as *mut std::ffi::c_void
-        }
-
-        #[no_mangle]
-        pub unsafe extern "C" fn free(
-            state: *mut std::ffi::c_void,
-            gi: *const $crate::GeneratorInfo,
-            intf: *const $crate::CallerAPI,
-                ) {
-            if state.is_null() { 
-                return; 
-            }
-            let _ = gi;
-            let intf = &*intf;
-
-            // Manual call of the destructor
-            std::ptr::drop_in_place(state as *mut $prng_type);
-            // Use custom free from SmokeRand!    
-            if let Some(free) = intf.free {
-                free(state as *mut std::ffi::c_void);
-            }
-        }
-
-
-        // ========== Callbacks for PRNG ==========
-        
-        #[no_mangle]
-        pub unsafe extern "C" fn get_bits(state: *mut std::ffi::c_void) -> u64 {
-            let state = &mut *(state as *mut $prng_type);
-            <$prng_type as $crate::Prng>::next(state).into()
-        }
-
-        #[no_mangle]
-        pub unsafe extern "C" fn get_sum(state: *mut std::ffi::c_void, len: usize) -> u64 {
-            let state = &mut *(state as *mut $prng_type);
-            let mut sum = 0u64;
-            for _ in 0..len {
-                let val = <$prng_type as $crate::Prng>::next(state);
-                sum = sum.wrapping_add(val.into());
-            }
-            sum
-        }
-
-        // ========== Stub for internal self-tests ==========
-        
-        #[no_mangle]
-        pub unsafe extern "C" fn self_test(intf: *const $crate::CallerAPI) -> CInt {
-            if intf.is_null() { 
-                return 0; 
-            }
-            let intf = &*intf;
-            if <$prng_type as $crate::Prng>::self_test(intf) { 
-                1 
-            } else { 
-                0 
-            }
-        }
-
-        // ========== Get information about generators ==========
-        
+        /// Get information about generators
         #[no_mangle]
         pub unsafe extern "C" fn gen_getinfo(
             gi: *mut $crate::GeneratorInfo,
-            _intf: *const $crate::CallerAPI,
+            intf: *const $crate::CallerAPI,
         ) -> i32 {
-            if gi.is_null() { 
-                return 0; 
+            if gi.is_null() {
+                return 0;
             }
-            
-            // Leaking memory for static strings (acceptable for DLL)
-            let name_str = Box::leak(format!("{}\0", $name).into_boxed_str());
-            let desc_str = Box::leak(format!("{}\0", $desc).into_boxed_str());
-            
-            (*gi).name = name_str.as_ptr() as *const i8;
-            (*gi).description = desc_str.as_ptr() as *const i8;
-            
-            let bits: u32 = <$prng_type as $crate::Prng>::bits();
-            $( let bits: u32 = $bits; )?
-            (*gi).nbits = bits;
-            
-            (*gi).create = Some(create);
-            (*gi).free = Some(free);
-            (*gi).get_bits = Some(get_bits);
-            (*gi).self_test = Some(self_test);
-            (*gi).get_sum = Some(get_sum);
-            (*gi).parent = std::ptr::null();
-            
-            1
+            let _ = intf;
+            let gi_ref: &mut $crate::GeneratorInfo = &mut *gi;
+            gi_ref.fill::<$prng_type>()
+        }
+
+        #[no_mangle]
+        #[export_name = "AddNumbers"]
+        pub unsafe extern "C" fn get_bits_exported(state: *mut std::ffi::c_void) -> u64 {
+            return $crate::cwrap::get_bits::<$prng_type>(state);
         }
     };
 }
 
-/// Helper macro for concatenation of string literals.
-/// May be used for addition of "\0" terminals to static strings.
-#[doc(hidden)]
+/*
 #[macro_export]
-macro_rules! const_concat {
-    ($a:literal, $b:literal) => {
-        const {
-            let a_bytes = $a.as_bytes();
-            let b_bytes = $b.as_bytes();
-            let mut result = [0u8; a_bytes.len() + b_bytes.len()];
-            let mut i = 0;
-            while i < a_bytes.len() {
-                result[i] = a_bytes[i];
-                i += 1;
-            }
-            while i < result.len() {
-                result[i] = b_bytes[i - a_bytes.len()];
-                i += 1;
-            }
-            unsafe { std::str::from_utf8_unchecked(&result) }
-        }
-    };
-}
-
-// An alternative is a simple macro concatenator
-#[doc(hidden)]
-#[macro_export]
-macro_rules! static_cstr {
-    ($s:literal) => {
-        unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(concat!($s, "\0").as_bytes()) }
-    };
-}
-
-/// A helper function that creates ASCIIZ C-style string
-pub fn to_c_string(s: &str) -> std::ffi::CString {
-    std::ffi::CString::new(s).expect("String contains null byte")
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_const_concat() {
-        let s = const_concat!("Hello", " World");
-        assert_eq!(s, "Hello World");
-    }
-}
+macro_rules! impl_ffi_for_prng_dispatcher {
+    (
+        type = $prng_type:ty,
+    )
+:ident
+*/

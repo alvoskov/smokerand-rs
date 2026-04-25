@@ -266,6 +266,4 @@ impl Prng for Tf1024VecState {
 
 impl_ffi_for_prng! {
     type = Tf1024VecState,
-    name = "ThreeFish1024 (Rust)",
-    description = "Threefish-1024 vectorized PRNG using std::simd",
 }
