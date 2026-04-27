@@ -1,56 +1,38 @@
 use smokerand_rs::*;
-use std::ops::{BitOr, BitXor};
+use std::ops::{BitOr, BitXor, Shr, Shl};
 use std::ffi::CStr;
 
 // ============ Трейт с разрядностью ============
-trait MwcWord: Copy + Default + PartialEq + PartialOrd + BitOr<Output = Self> + BitXor<Output = Self> {
-    const BITS: u32;
-    const SHIFT_AMOUNT: Self;
-    const RRX_SHIFT1: u32;
-    const RRX_SHIFT2: u32;
-    
-    // Переименовываем чтобы избежать конфликта
+trait MwcWord: Copy + Default + PartialEq + PartialOrd +
+    BitOr<Output = Self> + BitXor<Output = Self> + Shr<Output = Self> + Shl<Output = Self> {
+    const BITS: u32;    
     type PrngOutput;
     
-    fn wrapping_mul(self, other: Self) -> Self;
     fn wrapping_add(self, other: Self) -> Self;
     fn wrapping_sub(self, other: Self) -> Self;
-    fn wrapping_shl(self, rhs: u32) -> Self;
-    fn wrapping_shr(self, rhs: u32) -> Self;
     fn from_seed(intf: &CallerAPI) -> Option<Self>;
     fn to_prng_output(self) -> Self::PrngOutput;
-    fn to_u64(self) -> u64;  // ← Возвращаем to_u64 для арифметики
+    fn to_u64(self) -> u64;
     fn from_u64(v: u64) -> Self;
     fn zero() -> Self;
     fn one() -> Self;
     fn two() -> Self;
     
-    fn rotl(self, n: u32) -> Self {
-        (self.wrapping_shl(n)) | (self.wrapping_shr(Self::BITS - n))
-    }
-    
     fn sub_with_borrow(a: &mut Self, b: Self) -> Self;
     fn add_with_carry(a: &mut Self, b: Self) -> Self;
+    fn umuladd(a: Self, x: Self, c: Self) -> (Self, Self);
+    fn scramble(x: Self) -> Self;
 }
+
 
 impl MwcWord for u32 {
     const BITS: u32 = 32;
-    const SHIFT_AMOUNT: Self = 1;
-    const RRX_SHIFT1: u32 = 11;
-    const RRX_SHIFT2: u32 = 27;
-    
     type PrngOutput = u32;
     
-    #[inline(always)]
-    fn wrapping_mul(self, other: Self) -> Self { self.wrapping_mul(other) }
     #[inline(always)]
     fn wrapping_add(self, other: Self) -> Self { self.wrapping_add(other) }
     #[inline(always)]
     fn wrapping_sub(self, other: Self) -> Self { self.wrapping_sub(other) }
-    #[inline(always)]
-    fn wrapping_shl(self, rhs: u32) -> Self { self.wrapping_shl(rhs) }
-    #[inline(always)]
-    fn wrapping_shr(self, rhs: u32) -> Self { self.wrapping_shr(rhs) }
     #[inline(always)]
     fn from_seed(intf: &CallerAPI) -> Option<Self> { intf.seed32() }
     #[inline(always)]
@@ -81,26 +63,27 @@ impl MwcWord for u32 {
         *a = t;
         carry
     }
+
+    #[inline(always)]
+    fn umuladd(a: Self, x: Self, c: Self) -> (Self, Self) {
+        let product = (a as u64) * (x as u64) + (c as u64);
+        ((product >> 32) as Self, product as Self)
+    }
+
+    #[inline(always)]
+    fn scramble(x: Self) -> Self {
+        x ^ x.rotate_right(11) ^ x.rotate_right(27)
+    }
 }
 
 impl MwcWord for u64 {
-    const BITS: u32 = 64;
-    const SHIFT_AMOUNT: Self = 2;
-    const RRX_SHIFT1: u32 = 17;
-    const RRX_SHIFT2: u32 = 53;
-    
+    const BITS: u32 = 64;    
     type PrngOutput = u64;
     
-    #[inline(always)]
-    fn wrapping_mul(self, other: Self) -> Self { self.wrapping_mul(other) }
     #[inline(always)]
     fn wrapping_add(self, other: Self) -> Self { self.wrapping_add(other) }
     #[inline(always)]
     fn wrapping_sub(self, other: Self) -> Self { self.wrapping_sub(other) }
-    #[inline(always)]
-    fn wrapping_shl(self, rhs: u32) -> Self { self.wrapping_shl(rhs) }
-    #[inline(always)]
-    fn wrapping_shr(self, rhs: u32) -> Self { self.wrapping_shr(rhs) }
     #[inline(always)]
     fn from_seed(intf: &CallerAPI) -> Option<Self> { intf.seed64() }
     #[inline(always)]
@@ -131,20 +114,30 @@ impl MwcWord for u64 {
         *a = t;
         carry
     }
+
+    #[inline(always)]
+    fn umuladd(a: Self, x: Self, c: Self) -> (Self, Self) {
+        let product = (a as u128) * (x as u128) + (c as u128);
+        ((product >> 64) as Self, product as Self)
+    }
+
+    #[inline(always)]
+    fn scramble(x: Self) -> Self {
+        x ^ x.rotate_right(17) ^ x.rotate_right(53)
+    }
 }
 
-// ============ Структура состояния ============
 #[derive(Clone)]
-struct MwcFpState<W: MwcWord, const LAG: usize> {
+struct MwcFpState<W: MwcWord, const LAG: usize, const MUL: u64, const RRX: bool> {
     x: [W; LAG],
     x_extra: W,
     c: W,
     pos: usize,
-    mul: W,
 }
 
-impl<W: MwcWord, const LAG: usize> MwcFpState<W, LAG> {
-    fn new(intf: &CallerAPI, mul: u64) -> Option<Self> {
+
+impl<W: MwcWord, const LAG: usize, const MUL: u64, const RRX: bool> MwcFpState<W, LAG, MUL, RRX> {
+    fn new(intf: &CallerAPI) -> Option<Self> {
         let mut x = [W::zero(); LAG];
         
         for i in 0..LAG {
@@ -156,7 +149,6 @@ impl<W: MwcWord, const LAG: usize> MwcFpState<W, LAG> {
             x_extra: W::zero(),
             c: W::one(),
             pos: LAG,
-            mul: W::from_u64(mul),
         })
     }
     
@@ -180,35 +172,31 @@ impl<W: MwcWord, const LAG: usize> MwcFpState<W, LAG> {
     
     fn next_raw(&mut self) -> W {
         if self.pos == LAG {
-            let mul = self.mul;
-            
-            // Используем to_u64() для арифметики вместо to_output()
+            let mul = W::from_u64(MUL);            
+            // U = aX + c = H*2^(kw) + L
             let mut carry = self.c;
             for i in 0..LAG {
-                let product = (mul.to_u64() as u128) 
-                    * (self.get_x(i).to_u64() as u128)
-                    + (carry.to_u64() as u128);
-                self.set_x(i, W::from_u64(product as u64));
-                carry = W::from_u64((product >> W::BITS) as u64);
+                let (c, x) = W::umuladd(mul, self.get_x(i), carry);
+                self.set_x(i, x);
+                carry = c;
             }
-            
-            self.c = W::from_u64(
-                ((mul.to_u64() as u128) * (self.x_extra.to_u64() as u128)
-                 + (carry.to_u64() as u128)) as u64
-            );
-            
-            let c_shifted = self.c.wrapping_mul(W::SHIFT_AMOUNT);
-            
-            let mut borrow = W::sub_with_borrow(&mut self.x[0], c_shifted);
+            { // H
+                let (_, x) = W::umuladd(mul, self.x_extra, carry);
+                self.c = x;
+            }
+            // H*2^(kw) + L = H*(2^(kw) + 2) + (L - 2*H)            
+            let mut borrow = W::sub_with_borrow(&mut self.x[0], self.c << W::one());
             borrow = W::sub_with_borrow(
                 &mut self.x[1], 
-                self.c.wrapping_shr(W::BITS - 1).wrapping_add(borrow)
+                (self.c >> W::from_u64((W::BITS - 1) as u64)).wrapping_add(borrow)
             );
             
             for i in 2..LAG {
                 borrow = W::sub_with_borrow(&mut self.x[i], borrow);
             }
-            
+            // Process a special case: L < 2*H
+            // H*2^(kw) + L = (H - 1)*(2^(kw) + 2) + (2^(kw) + 2 + L - 2*H)
+            // Note that (L - 2*H) mod 2^(kw) gives (L - H + 2^(kw))            
             if borrow == W::zero() {
                 self.x_extra = W::zero();
             } else {
@@ -219,19 +207,44 @@ impl<W: MwcWord, const LAG: usize> MwcFpState<W, LAG> {
                 }
                 self.x_extra = carry;
             }
-            
             self.pos = 0;
-        }
-        
-        let result = if self.pos < LAG {
+        };
+        let result = if RRX {
             self.x[self.pos]
         } else {
-            self.x_extra
+            W::scramble(self.x[self.pos])
         };
         self.pos += 1;
         result
     }
 }
+
+
+//struct 
+
+/// Interface part
+impl<W: MwcWord, const LAG: usize, const MUL: u64, const RRX: bool> Prng for MwcFpState<W, LAG, MUL, RRX>
+where
+    W::PrngOutput: PrngOutput,
+{
+    type Output = W::PrngOutput;
+
+    fn name() -> &'static str {
+        "MWCNAME"
+    }
+    
+    fn description() -> &'static str {
+        "MWCDESCR"
+    }
+
+    #[inline(always)]
+    fn next(&mut self) -> Self::Output {
+        let val = self.next_raw();
+        val.to_prng_output()
+    }
+}
+
+
 
 
 /// Тест для 64-битных генераторов
@@ -395,28 +408,21 @@ macro_rules! declare_mwcfp_variant {
     ) => {
         #[derive(Clone)]
         struct $name {
-            inner: MwcFpState<$word, $lag>,
+            inner: MwcFpState<$word, $lag, $mul, $use_rrx>,
         }
         
         impl Prng for $name {
             type Output = <$word as MwcWord>::PrngOutput;
             
             fn new(intf: &CallerAPI) -> Option<Self> {
-                MwcFpState::<$word, $lag>::new(intf, $mul)
+                MwcFpState::<$word, $lag, $mul, $use_rrx>::new(intf)
                     .map(|inner| $name { inner })
             }
             
             #[inline(always)]
             fn next(&mut self) -> Self::Output {
                 let val = self.inner.next_raw();
-                
-                let result = if $use_rrx {
-                    val ^ val.rotl(<$word>::RRX_SHIFT1) ^ val.rotl(<$word>::RRX_SHIFT2)
-                } else {
-                    val
-                };
-                
-                result.to_prng_output()
+                val.to_prng_output()
             }
             
             fn name() -> &'static str {
